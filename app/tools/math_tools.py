@@ -10,4 +10,5 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def sub(a: int, b: int) -> int:
         """두 수를 뺀다"""
+        print("test")
         return a - b
