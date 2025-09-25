@@ -6,4 +6,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.14.1",
+    "pdfminer-six>=20250506",
+    "pypdf>=6.1.0",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
 ]
