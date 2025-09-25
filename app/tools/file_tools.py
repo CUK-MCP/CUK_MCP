@@ -1,19 +1,40 @@
+
 from __future__ import annotations
 
 import fnmatch
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-from mcp.server.fastmcp import FastMCP
 from app.context import AppCtx
-from classes.file_class import MultiBaseFileManager
-
+from classes.file_class import MultiBaseFileManager  # <-- user's path
+from mcp.server.fastmcp import FastMCP, Context
 # ---------- helpers ----------
 
-def _get_manager(ctx: AppCtx) -> MultiBaseFileManager:
-    if ctx.file_manager is None:
-        ctx.file_manager = MultiBaseFileManager([p.resolve() for p in ctx.allowed_paths])
-    return ctx.file_manager
+from pathlib import Path
+
+def _coerce_paths(values):
+    out = []
+    for v in (values or []):
+        out.append(v if isinstance(v, Path) else Path(str(v)))
+    return [p.resolve() for p in out]
+
+def _get_app_ctx(ctx: Context) -> AppCtx:
+    lc = getattr(ctx.request_context, "lifespan_context", None)
+    # 우리가 lifespan에서 yield {"app": app} 형태로 보냈다고 가정
+    if isinstance(lc, dict) and isinstance(lc.get("app"), AppCtx):
+        return lc["app"]
+    # 혹시 그냥 AppCtx를 바로 yield했다면 이것도 허용
+    if isinstance(lc, AppCtx):
+        return lc
+    # 디버그 로그
+
+    raise RuntimeError("lifespan_context에 AppCtx가 없습니다. lifespan yield를 확인하세요.")
+
+def _get_manager(ctx: Context) -> MultiBaseFileManager:
+    app = _get_app_ctx(ctx)
+    if getattr(app, "file_manager", None) is None:
+        bases = [p if isinstance(p, Path) else Path(str(p)) for p in (app.allowed_paths or [])]
+        bases = [p.resolve() for p in bases]
+        app.file_manager = MultiBaseFileManager(bases)
+    return app.file_manager
 
 def _split_rel(rel_path: str) -> Tuple[str, str, str]:
     """Return (dir, stem, ext) for a relative path string."""
@@ -33,19 +54,15 @@ def _fuzzy_pick_file(
     List files under rel_dir, optionally filter by glob (e.g., '*.pptx'),
     then fuzzy-match by name (stem). Return best and candidates.
     """
-    # 1) list items
     items = fm.listdir(base_index=base_index, rel=Path(rel_dir or "."), files_only=True, max_items=1000)
-    # 2) optional glob filter
     if glob:
         items = [it for it in items if fnmatch.fnmatch(it["name"], glob)]
-    # 3) score by SequenceMatcher on stem
     from difflib import SequenceMatcher
     q = (fuzzy_name or "").strip().lower()
     scored: List[Dict[str, Any]] = []
     for it in items:
         stem = Path(it["name"]).stem.lower()
         s = SequenceMatcher(None, q, stem).ratio() if q else 0.0
-        # light rule-based boosts
         if stem == q:
             s += 0.30
         elif stem.startswith(q):
@@ -59,7 +76,6 @@ def _fuzzy_pick_file(
     top = scored[:topk]
     if not top:
         return {"found": False, "candidates": []}
-    # auto-pick if clear winner
     if top[0]["score"] >= 0.75 and (len(top) == 1 or top[0]["score"] - top[1]["score"] >= 0.1):
         return {"found": True, "best": top[0], "candidates": top}
     return {"found": "ambiguous", "candidates": top}
@@ -69,29 +85,20 @@ def _fuzzy_pick_file(
 def register(mcp: FastMCP) -> None:
     """
     파일 관련 MCP 툴들을 등록합니다.
-    포함: file.read_text (자동 퍼지 폴백), file.find_folder, file.listdir, file.find_file
+    포함: file-read-text (자동 퍼지 폴백), file-find-folder, file-listdir, file-find-file
+    (툴 이름은 ^[a-zA-Z0-9_-]{1,64}$ 규칙을 만족해야 하므로 '.'(dot) 금지)
     """
 
     @mcp.tool(
-        name="file.find_folder",
+        name="file-find-folder",
         description="여러 베이스 경로에서 폴더명을 퍼지 매칭으로 찾아 Top-K 후보를 반환합니다."
     )
     async def file_find_folder(
-        ctx: AppCtx,
+        ctx: Context,
         name: str,
         max_depth: int = 2,
         topk: int = 5,
     ) -> Dict[str, Any]:
-        """
-        인자(Args):
-            ctx: lifespan에서 주입되는 애플리케이션 컨텍스트.
-            name: 찾고자 하는 폴더명(대략적으로 입력해도 됩니다).
-            max_depth: 각 베이스 경로에서 탐색할 최대 깊이(기본 2).
-            topk: 반환할 후보 개수 상한.
-
-        반환(Returns):
-            {found, best?, candidates[]} 형태의 딕셔너리.
-        """
         fm = _get_manager(ctx)
         try:
             return fm.find_folder(name, max_depth=max_depth, topk=topk)
@@ -101,29 +108,17 @@ def register(mcp: FastMCP) -> None:
             return {"error": f"탐색 실패: {e}"}
 
     @mcp.tool(
-        name="file.listdir",
+        name="file-listdir",
         description="특정 베이스/상대 경로 하위의 파일/폴더 목록을 반환합니다. glob로 필터링할 수 있습니다(예: '*.pptx')."
     )
     async def file_listdir(
-        ctx: AppCtx,
+        ctx: Context,
         base_index: int = 0,
         rel_path: Optional[str] = None,
         files_only: bool = False,
         max_items: int = 500,
         glob: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        인자(Args):
-            ctx: lifespan에서 주입되는 애플리케이션 컨텍스트.
-            base_index: 허용 베이스 경로 인덱스.
-            rel_path: 베이스 기준 상대 경로(없으면 루트).
-            files_only: 파일만 반환할지 여부.
-            max_items: 최대 항목 수.
-            glob: 파일명 패턴(예: '*.pptx', 'intro*.pptx').
-
-        반환(Returns):
-            {items: [...], base, directory} 형태의 딕셔너리.
-        """
         fm = _get_manager(ctx)
         try:
             items = fm.listdir(base_index=base_index, rel=Path(rel_path or "."), files_only=files_only, max_items=max_items)
@@ -140,29 +135,17 @@ def register(mcp: FastMCP) -> None:
             return {"error": f"목록 실패: {e}"}
 
     @mcp.tool(
-        name="file.find_file",
+        name="file-find-file",
         description="지정한 폴더(rel_dir) 안에서 fuzzy 이름 매칭으로 파일을 찾아 Top-K를 반환합니다(선택적으로 glob 필터 사용)."
     )
     async def file_find_file(
-        ctx: AppCtx,
+        ctx: Context,
         base_index: int,
         rel_dir: str,
         fuzzy_name: str,
         glob: Optional[str] = None,
         topk: int = 5,
     ) -> Dict[str, Any]:
-        """
-        인자(Args):
-            ctx: lifespan에서 주입되는 애플리케이션 컨텍스트.
-            base_index: 허용 베이스 경로 인덱스.
-            rel_dir: 검색할 폴더(베이스 기준 상대 경로).
-            fuzzy_name: 대략적인 파일명(오타/축약 허용).
-            glob: 패턴 필터(예: '*.pptx').
-            topk: 반환할 후보 상한.
-
-        반환(Returns):
-            {found, best?, candidates[]} 형태의 딕셔너리.
-        """
         fm = _get_manager(ctx)
         try:
             return _fuzzy_pick_file(fm, base_index, rel_dir, fuzzy_name, glob=glob, cutoff=0.6, topk=topk)
@@ -174,11 +157,11 @@ def register(mcp: FastMCP) -> None:
             return {"error": f"파일 탐색 실패: {e}"}
 
     @mcp.tool(
-        name="file.read_text",
+        name="file-read-text",
         description="PDF/PPTX/DOCX/TXT/MD 파일에서 텍스트를 추출합니다. (상대경로 또는 절대경로로 지정) 자동 퍼지 폴백을 지원합니다."
     )
     async def file_read_text(
-        ctx: AppCtx,
+        ctx: Context,
         base_index: int = 0,
         rel_path: Optional[str] = None,
         absolute_path: Optional[str] = None,
@@ -187,20 +170,6 @@ def register(mcp: FastMCP) -> None:
         overlap: int = 150,
         auto_fuzzy: bool = True,
     ) -> Dict[str, Any]:
-        """
-        인자(Args):
-            ctx: lifespan에서 주입되는 애플리케이션 컨텍스트.
-            base_index: 상대 경로를 해석할 때 사용할 허용 베이스 경로의 인덱스.
-            rel_path: 베이스 기준 상대 경로 (예: '과제/보고서.pdf').
-            absolute_path: 허용 루트 하위의 절대 경로. 제공되면 rel_path는 무시됩니다.
-            do_chunk: 텍스트를 LLM 친화적인 청크로 분할할지 여부.
-            chunk_size: 각 청크의 문자 길이.
-            overlap: 청크 간 겹치는 문자 수.
-            auto_fuzzy: 파일이 없을 때 같은 폴더 내에서 퍼지 매칭으로 파일명을 보정 후 재시도할지 여부.
-
-        반환(Returns):
-            {text, metadata, source, chunks?} 형태의 딕셔너리.
-        """
         fm = _get_manager(ctx)
 
         def _as_payload(res) -> Dict[str, Any]:
@@ -231,7 +200,6 @@ def register(mcp: FastMCP) -> None:
 
                 # 자동 퍼지 복구
                 rel_dir, stem, ext = _split_rel(rel_path)
-                # ext 기반 glob 추정
                 glob = None
                 if ext in {".pptx", ".ppt", ".pdf", ".docx", ".txt", ".md"}:
                     glob = f"*{ext}"
@@ -240,9 +208,7 @@ def register(mcp: FastMCP) -> None:
                 if fuzzy.get("found") is True and "best" in fuzzy:
                     best = fuzzy["best"]
                     fixed_rel = str(Path(rel_dir) / best["name"]) if rel_dir else best["name"]
-                    # 재시도
                     res2 = fm.extract_from(base_index, Path(fixed_rel), do_chunk=do_chunk, chunk_size=chunk_size, overlap=overlap)
-                    # 출처 기록
                     res2.metadata["resolved_from"] = rel_path
                     return _as_payload(res2)
                 elif fuzzy.get("found") == "ambiguous":
