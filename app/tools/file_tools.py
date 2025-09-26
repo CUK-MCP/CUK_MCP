@@ -226,15 +226,17 @@ def register(mcp: FastMCP, enable_legacy: bool = False) -> None:
         chunk_size: int = 1200,
         overlap: int = 150,
         auto_fuzzy: bool = True,
+        do_text: bool = False
     ) -> Dict[str, Any]:
         fm = _get_manager(ctx)
 
         def _as_payload(res) -> Dict[str, Any]:
             payload: Dict[str, Any] = {
-                "text": res.text,
                 "metadata": res.metadata,
                 "source": res.metadata.get("source"),
             }
+            if do_text:
+                payload["text"] = res.text
             if do_chunk:
                 payload["chunks"] = res.chunks or []
             return payload
