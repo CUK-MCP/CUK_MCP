@@ -82,7 +82,7 @@ def _fuzzy_pick_file(
 
 # ---------- registration ----------
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: FastMCP, enable_legacy: bool = False) -> None:
     """
     파일 관련 MCP 툴들을 등록합니다.
     포함: file-read-text (자동 퍼지 폴백), file-find-folder, file-listdir, file-find-file
@@ -90,38 +90,21 @@ def register(mcp: FastMCP) -> None:
     """
 
     @mcp.tool(
-        name="file-find-folder",
-        description="여러 베이스 경로에서 폴더명을 퍼지 매칭으로 찾아 Top-K 후보를 반환합니다."
-    )
-    async def file_find_folder(
-        ctx: Context,
-        name: str,
-        max_depth: int = 2,
-        topk: int = 5,
-    ) -> Dict[str, Any]:
-        fm = _get_manager(ctx)
-        try:
-            return fm.find_folder(name, max_depth=max_depth, topk=topk)
-        except PermissionError as e:
-            return {"error": f"권한 오류: {e}"}
-        except Exception as e:
-            return {"error": f"탐색 실패: {e}"}
-
-    @mcp.tool(
         name="file-listdir",
         description="특정 베이스/상대 경로 하위의 파일/폴더 목록을 반환합니다. glob로 필터링할 수 있습니다(예: '*.pptx')."
     )
     async def file_listdir(
-        ctx: Context,
-        base_index: int = 0,
-        rel_path: Optional[str] = None,
-        files_only: bool = False,
-        max_items: int = 500,
-        glob: Optional[str] = None,
+            ctx: Context,
+            base_index: int = 0,
+            rel_path: Optional[str] = None,
+            files_only: bool = False,
+            max_items: int = 500,
+            glob: Optional[str] = None,
     ) -> Dict[str, Any]:
         fm = _get_manager(ctx)
         try:
-            items = fm.listdir(base_index=base_index, rel=Path(rel_path or "."), files_only=files_only, max_items=max_items)
+            items = fm.listdir(base_index=base_index, rel=Path(rel_path or "."), files_only=files_only,
+                               max_items=max_items)
             if glob:
                 items = [it for it in items if fnmatch.fnmatch(it["name"], glob)]
             base = str(fm.allowed[base_index])
@@ -135,26 +118,100 @@ def register(mcp: FastMCP) -> None:
             return {"error": f"목록 실패: {e}"}
 
     @mcp.tool(
-        name="file-find-file",
-        description="지정한 폴더(rel_dir) 안에서 fuzzy 이름 매칭으로 파일을 찾아 Top-K를 반환합니다(선택적으로 glob 필터 사용)."
+        name="file-list-candidates",
+        description=(
+            "지정 폴더의 파일 후보를 반환합니다. "
+            "폴더 내 파일 수가 threshold(기본 100) 초과면 fuzzy Top-K만, "
+            "그 이하면 전체 목록을 반환합니다. LLM이 최종 선택하세요."
+        )
     )
-    async def file_find_file(
+    async def file_list_candidates(
         ctx: Context,
         base_index: int,
-        rel_dir: str,
-        fuzzy_name: str,
-        glob: Optional[str] = None,
-        topk: int = 5,
+        rel_dir: str = "",
+        query_name: str = "",          # 사용자가 말한 대략적 파일명(없어도 됨)
+        glob: Optional[str] = None,    # 예: '*.pptx'
+        threshold: int = 100,          # 100개 기준 분기
+        fuzzy_topk: int = 20           # 퍼지일 때 후보 상한
     ) -> Dict[str, Any]:
         fm = _get_manager(ctx)
-        try:
-            return _fuzzy_pick_file(fm, base_index, rel_dir, fuzzy_name, glob=glob, cutoff=0.6, topk=topk)
-        except FileNotFoundError as e:
-            return {"error": f"경로를 찾을 수 없습니다: {e}"}
-        except PermissionError as e:
-            return {"error": f"권한 오류: {e}"}
-        except Exception as e:
-            return {"error": f"파일 탐색 실패: {e}"}
+
+        # 1) 폴더 나열
+        items = fm.listdir(
+            base_index=base_index,
+            rel=Path(rel_dir or "."),
+            files_only=True,
+            max_items=10_000  # 내부 상한(안전빵) — 실제 반환은 분기 아래에서 조절
+        )
+
+        # 2) 확장자/패턴 필터
+        if glob:
+            items = [it for it in items if fnmatch.fnmatch(it["name"], glob)]
+
+        total = len(items)
+
+        # 3) 분기
+        if total <= threshold:
+            # 전체 파일을 그대로 전달 (LLM이 선택)
+            slim = [
+                {
+                    "name": it["name"],
+                    "rel": it.get("rel", it["name"]),
+                    "ext": Path(it["name"]).suffix.lower(),
+                    "mtime": it.get("mtime"),
+                    "size": it.get("size"),
+                }
+                for it in items
+            ]
+            return {
+                "strategy": "all",
+                "total": total,
+                "items": slim,
+                "base_index": base_index,
+                "rel_dir": rel_dir,
+                "note": (
+                    f"파일이 {total}개로 threshold({threshold}) 이하입니다. "
+                    "LLM은 items에서 가장 적절한 파일 1개를 골라, "
+                    "그 파일명을 rel_path로 하여 file-read-text를 호출하세요."
+                )
+            }
+
+        # total > threshold → 퍼지 후보만 반환
+        fuzzy = _fuzzy_pick_file(
+            fm=fm,
+            base_index=base_index,
+            rel_dir=rel_dir,
+            fuzzy_name=query_name or "",
+            glob=glob,
+            cutoff=0.0,          # 컷오프 낮게(후보는 topk로 자름)
+            topk=fuzzy_topk
+        )
+
+        cand = [
+            {
+                "name": c["name"],
+                "rel": c.get("rel", c["name"]),
+                "score": c.get("score", 0.0),
+                "ext": Path(c["name"]).suffix.lower(),
+                "mtime": c.get("mtime"),
+                "size": c.get("size"),
+            }
+            for c in fuzzy.get("candidates", [])
+        ]
+
+        return {
+            "strategy": "fuzzy",
+            "total": total,
+            "candidates": cand,
+            "base_index": base_index,
+            "rel_dir": rel_dir,
+            "note": (
+                f"파일이 {total}개로 threshold({threshold}) 초과입니다. "
+                "LLM은 candidates에서 가장 적절한 파일 1개를 고르세요. "
+                "만약 비슷한 파일명이 없다고 판단하면 사용자에게 "
+                "‘폴더에 파일이 너무 많고 요청하신 파일명과 비슷한 파일이 없습니다’라고 안내해 주세요."
+            )
+        }
 
     @mcp.tool(
         name="file-read-text",
@@ -231,3 +288,44 @@ def register(mcp: FastMCP) -> None:
             return {"error": f"요청 오류: {e}"}
         except Exception as e:
             return {"error": f"추출 실패: {e}"}
+    if enable_legacy:
+        @mcp.tool(
+            name="file-find-folder",
+            description="여러 베이스 경로에서 폴더명을 퍼지 매칭으로 찾아 Top-K 후보를 반환합니다."
+        )
+        async def file_find_folder(
+            ctx: Context,
+            name: str,
+            max_depth: int = 2,
+            topk: int = 5,
+        ) -> Dict[str, Any]:
+            fm = _get_manager(ctx)
+            try:
+                return fm.find_folder(name, max_depth=max_depth, topk=topk)
+            except PermissionError as e:
+                return {"error": f"권한 오류: {e}"}
+            except Exception as e:
+                return {"error": f"탐색 실패: {e}"}
+
+
+        @mcp.tool(
+            name="file-find-file",
+            description="지정한 폴더(rel_dir) 안에서 fuzzy 이름 매칭으로 파일을 찾아 Top-K를 반환합니다(선택적으로 glob 필터 사용)."
+        )
+        async def file_find_file(
+            ctx: Context,
+            base_index: int,
+            rel_dir: str,
+            fuzzy_name: str,
+            glob: Optional[str] = None,
+            topk: int = 5,
+        ) -> Dict[str, Any]:
+            fm = _get_manager(ctx)
+            try:
+                return _fuzzy_pick_file(fm, base_index, rel_dir, fuzzy_name, glob=glob, cutoff=0.6, topk=topk)
+            except FileNotFoundError as e:
+                return {"error": f"경로를 찾을 수 없습니다: {e}"}
+            except PermissionError as e:
+                return {"error": f"권한 오류: {e}"}
+            except Exception as e:
+                return {"error": f"파일 탐색 실패: {e}"}
