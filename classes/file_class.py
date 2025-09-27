@@ -7,7 +7,7 @@ import hashlib
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol
+from typing import Dict, List, Optional, Protocol, Union
 
 # ---------- Data models ----------
 
