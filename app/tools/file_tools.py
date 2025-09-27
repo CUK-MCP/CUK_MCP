@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import fnmatch
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from app.context import AppCtx
 from classes.file_class import MultiBaseFileManager  # <-- user's path
 from mcp.server.fastmcp import FastMCP, Context
@@ -90,49 +90,21 @@ def register(mcp: FastMCP, enable_legacy: bool = False) -> None:
     """
 
     @mcp.tool(
-        name="file-listdir",
-        description="특정 베이스/상대 경로 하위의 파일/폴더 목록을 반환합니다. glob로 필터링할 수 있습니다(예: '*.pptx')."
-    )
-    async def file_listdir(
-            ctx: Context,
-            base_index: int = 0,
-            rel_path: Optional[str] = None,
-            files_only: bool = False,
-            max_items: int = 500,
-            glob: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        fm = _get_manager(ctx)
-        try:
-            items = fm.listdir(base_index=base_index, rel=Path(rel_path or "."), files_only=files_only,
-                               max_items=max_items)
-            if glob:
-                items = [it for it in items if fnmatch.fnmatch(it["name"], glob)]
-            base = str(fm.allowed[base_index])
-            directory = str((fm.allowed[base_index] / (rel_path or ".")).resolve())
-            return {"items": items, "base": base, "directory": directory}
-        except FileNotFoundError as e:
-            return {"error": f"경로를 찾을 수 없습니다: {e}"}
-        except PermissionError as e:
-            return {"error": f"권한 오류: {e}"}
-        except Exception as e:
-            return {"error": f"목록 실패: {e}"}
-
-    @mcp.tool(
         name="file-list-candidates",
         description=(
-            "지정 폴더의 파일 후보를 반환합니다. "
-            "폴더 내 파일 수가 threshold(기본 100) 초과면 fuzzy Top-K만, "
-            "그 이하면 전체 목록을 반환합니다. LLM이 최종 선택하세요."
+                "지정 폴더의 파일 후보를 반환합니다. "
+                "폴더 내 파일 수가 threshold(기본 100) 초과면 fuzzy Top-K만, "
+                "그 이하면 전체 목록을 반환합니다. LLM이 최종 선택하세요."
         )
     )
     async def file_list_candidates(
-        ctx: Context,
-        base_index: int,
-        rel_dir: str = "",
-        query_name: str = "",          # 사용자가 말한 대략적 파일명(없어도 됨)
-        glob: Optional[str] = None,    # 예: '*.pptx'
-        threshold: int = 100,          # 100개 기준 분기
-        fuzzy_topk: int = 20           # 퍼지일 때 후보 상한
+            ctx: Context,
+            base_index: int,
+            rel_dir: str = "",
+            query_name: str = "",  # 사용자가 말한 대략적 파일명(없어도 됨)
+            glob: Optional[str] = None,  # 예: '*.pptx'
+            threshold: int = 100,  # 100개 기준 분기
+            fuzzy_topk: int = 20  # 퍼지일 때 후보 상한
     ) -> Dict[str, Any]:
         fm = _get_manager(ctx)
 
@@ -183,7 +155,7 @@ def register(mcp: FastMCP, enable_legacy: bool = False) -> None:
             rel_dir=rel_dir,
             fuzzy_name=query_name or "",
             glob=glob,
-            cutoff=0.0,          # 컷오프 낮게(후보는 topk로 자름)
+            cutoff=0.0,  # 컷오프 낮게(후보는 topk로 자름)
             topk=fuzzy_topk
         )
 
@@ -212,6 +184,79 @@ def register(mcp: FastMCP, enable_legacy: bool = False) -> None:
                 "‘폴더에 파일이 너무 많고 요청하신 파일명과 비슷한 파일이 없습니다’라고 안내해 주세요."
             )
         }
+
+    @mcp.tool(
+        name="file-listdir",
+        description="특정 베이스/상대 경로 하위의 파일/폴더 목록을 반환합니다. glob로 필터링할 수 있습니다(예: '*.pptx')."
+    )
+    async def file_listdir(
+            ctx: Context,
+            base_index: int = 0,
+            rel_path: Optional[str] = None,
+            files_only: bool = False,
+            max_items: int = 500,
+            glob: Optional[str] = None,
+
+            # ▼ 추가: 바로 아래 '폴더만' 보고 싶을 때 True
+            dirs_only: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        인자(Args):
+          ...
+          files_only: 파일만 반환
+          dirs_only:  디렉토리만 반환(둘 다 True면 dirs_only 우선)
+        """
+        import os, fnmatch
+        from pathlib import Path
+
+        fm = _get_manager(ctx)
+        try:
+            base = fm.allowed[base_index]
+            root_abs = fm._safe_resolve(base / Path(rel_path or "."), default_base_index=base_index) \
+                if hasattr(fm, "_safe_resolve") else (base / Path(rel_path or ".")).resolve()
+            if not root_abs.exists() or not root_abs.is_dir():
+                return {"error": f"경로를 찾을 수 없습니다: {root_abs}"}
+
+            items, count = [], 0
+            with os.scandir(root_abs) as it:
+                for entry in it:
+                    if count >= max_items:
+                        break
+
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file(follow_symlinks=False)
+
+                    # 필터링: dirs_only가 True면 디렉토리만, 아니면 files_only 적용
+                    if dirs_only:
+                        if not is_dir:
+                            continue
+                    elif files_only:
+                        if not is_file:
+                            continue
+
+                    if glob and not fnmatch.fnmatch(entry.name, glob):
+                        continue
+
+                    p = Path(entry.path)
+                    items.append({
+                        "name": entry.name,
+                        "path": str(p),
+                        "rel": str(p.relative_to(root_abs)),
+                        "is_dir": is_dir,
+                        "is_file": is_file,
+                        "size": (p.stat().st_size if is_file else None),
+                    })
+                    count += 1
+
+            return {"items": items, "base": str(base), "directory": str(root_abs)}
+        except FileNotFoundError as e:
+            return {"error": f"경로를 찾을 수 없습니다: {e}"}
+        except PermissionError as e:
+            return {"error": f"권한 오류: {e}"}
+        except Exception as e:
+            return {"error": f"목록 실패: {e}"}
+
+
 
     @mcp.tool(
         name="file-read-text",
@@ -290,6 +335,143 @@ def register(mcp: FastMCP, enable_legacy: bool = False) -> None:
             return {"error": f"요청 오류: {e}"}
         except Exception as e:
             return {"error": f"추출 실패: {e}"}
+
+    @mcp.tool(
+        name="file-make-dirs",
+        description="여러 개의 폴더를 한 번에 생성합니다. parent_rel 아래에 names 배열의 각 폴더를 만듭니다."
+    )
+    async def file_make_dirs(
+            ctx: Context,
+            base_index: int,
+            names: List[str],
+            parent_rel: str = "",
+            parents: bool = True,
+            exist_ok: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Args:
+          base_index: 허용 베이스 경로 인덱스
+          names: 생성할 폴더 이름들의 배열(상대경로 허용: 'a/b/c')
+          parent_rel: 이 아래에 폴더들을 생성(기본: 베이스 루트)
+          parents/exist_ok: pathlib.mkdir 옵션
+        Returns:
+          {"created":[...], "errors":[...], "base": "...", "parent": "..."}
+        """
+        fm = _get_manager(ctx)
+        created, errors = [], []
+
+        # parent 디렉토리 안전 해석
+        try:
+            parent = Path(parent_rel or ".")
+            if hasattr(fm, "_safe_resolve"):
+                parent_abs = fm._safe_resolve(fm.allowed[base_index] / parent, default_base_index=base_index)
+            else:
+                parent_abs = (fm.allowed[base_index] / parent).resolve()
+            parent_abs.mkdir(parents=True, exist_ok=True)
+            if not parent_abs.exists() or not parent_abs.is_dir():
+                raise FileNotFoundError(f"Parent not a directory: {parent_abs}")
+        except Exception as e:
+            return {"created": [], "errors": [{"parent_prep": str(e)}]}
+
+        for name in names or []:
+            try:
+                target_rel = Path(name)
+                # 상대경로를 허용(중첩 폴더도 생성 가능)
+                target_abs = parent_abs / target_rel
+                target_abs.mkdir(parents=parents, exist_ok=exist_ok)
+                if not target_abs.exists() or not target_abs.is_dir():
+                    raise RuntimeError(f"Failed to create: {target_abs}")
+                created.append(str(target_abs))
+            except Exception as e:
+                errors.append({"name": name, "error": str(e)})
+
+        return {
+            "created": created,
+            "errors": errors,
+            "base": str(fm.allowed[base_index]),
+            "parent": str(parent_abs),
+        }
+
+    @mcp.tool(
+        name="file-move-files",
+        description="하나 이상의 파일을 다른 폴더로 이동(잘라넣기)합니다. items에 단일/배치 모두 허용."
+    )
+    async def file_move_files(
+            ctx: Context,
+            items: Union[Dict[str, Any], List[Dict[str, Any]]],
+            dst_base_index: Optional[int] = None,  # 없으면 첫 항목의 src_base_index 사용
+            dst_folder_rel: str = ".",
+            overwrite: bool = False,
+            create_dst: bool = True,
+            dry_run: bool = False,
+            on_error: str = "continue",  # "continue" | "stop"
+    ) -> Dict[str, Any]:
+        """
+        items 예시:
+          단일:
+            {"src_base_index": 0, "src_rel": "inbox/a.txt"}
+          배치:
+            [
+              {"src_base_index": 0, "src_rel": "inbox/a.txt"},
+              {"base_index": 0, "src_dir": "inbox", "src_name": "b.txt", "new_name": "b_final.txt"}
+            ]
+        동의어:
+          - src_base_index | base_index
+          - src_rel | src_rel_path | rel_path
+          - src_dir | dir
+          - src_name | name
+        """
+        fm = _get_manager(ctx)
+
+        # 1) 단일 dict도 허용 → 리스트로 정규화
+        if isinstance(items, dict):
+            items = [items]
+
+        # 2) items 정규화(동의어 수렴 + Path화)
+        norm: List[Dict[str, Any]] = []
+        for it in items:
+            sbi = it.get("src_base_index", it.get("base_index"))
+            srel = it.get("src_rel") or it.get("src_rel_path") or it.get("rel_path")
+            sdir = it.get("src_dir", it.get("dir"))
+            sname = it.get("src_name", it.get("name"))
+
+            if sbi is None:
+                return {"moved": [], "errors": [{"item": it, "error": "src_base_index(또는 base_index) 필요"}]}
+
+            if srel:
+                rel = Path(str(srel))
+            elif sdir and sname:
+                rel = Path(str(sdir)) / str(sname)
+            else:
+                return {"moved": [], "errors": [{"item": it, "error": "src_rel/rel_path 또는 (src_dir+src_name) 필요"}]}
+
+            one = {"src_base_index": int(sbi), "src_rel": rel}
+            if "new_name" in it and it["new_name"]:
+                one["new_name"] = str(it["new_name"])
+            norm.append(one)
+
+        # 3) 목적지 기본값 보정
+        if dst_base_index is None:
+            dst_base_index = int(norm[0]["src_base_index"])
+
+        # 4) 클래스의 move_many 호출(정책/검증은 클래스에서 일관 처리)
+        try:
+            return fm.move_many(
+                items=norm,
+                dst_base_index=int(dst_base_index),
+                dst_folder_rel=Path(dst_folder_rel or "."),
+                overwrite=bool(overwrite),
+                create_dst=bool(create_dst),
+                dry_run=bool(dry_run),
+                on_error=str(on_error),
+            )
+        except PermissionError as e:
+            return {"moved": [], "errors": [{"error": f"권한 오류: {e}"}]}
+        except FileNotFoundError as e:
+            return {"moved": [], "errors": [{"error": f"경로/파일을 찾을 수 없습니다: {e}"}]}
+        except Exception as e:
+            return {"moved": [], "errors": [{"error": f"이동 실패: {e}"}]}
+
     if enable_legacy:
         @mcp.tool(
             name="file-find-folder",

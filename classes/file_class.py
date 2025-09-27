@@ -351,3 +351,122 @@ class MultiBaseFileManager:
         if do_chunk:
             res.chunks = self._chunk_text(res.text, chunk_size=chunk_size, overlap=overlap)
         return res
+
+    # ---- folder ops ----
+    def make_dir(self, base_index: int, rel: Path, *, parents: bool = True, exist_ok: bool = True) -> Path:
+        """
+        지정한 베이스/상대경로에 폴더 생성.
+        반환값: 생성(또는 존재)하는 디렉터리의 절대 경로
+        """
+        target = self._safe_resolve(self.allowed[base_index] / rel, default_base_index=base_index)
+        target.mkdir(parents=parents, exist_ok=exist_ok)
+        if not target.exists() or not target.is_dir():
+            raise RuntimeError(f"Failed to create directory: {target}")
+        return target
+
+    def ensure_dir(self, base_index: int, rel: Path) -> Path:
+        """폴더가 없으면 만들고, 있으면 그대로 반환."""
+        return self.make_dir(base_index, rel, parents=True, exist_ok=True)
+
+    # ---- move (cut & paste) ops ----
+    def _unique_name(self, folder: Path, name: str) -> str:
+        """
+        folder 안에서 name이 겹치면 'name (1).ext', 'name (2).ext'... 형태로 비충돌 이름 생성
+        """
+        stem = Path(name).stem
+        suffix = Path(name).suffix
+        cand = name
+        i = 1
+        while (folder / cand).exists():
+            cand = f"{stem} ({i}){suffix}"
+            i += 1
+        return cand
+
+    def _move(
+            self,
+            src_base_index: int,
+            src_rel: Path,
+            dst_base_index: int,
+            dst_folder_rel: Path,
+            *,
+            new_name: Optional[str] = None,
+            overwrite: bool = False,
+            dry_run: bool = False,
+            _prepped_dst: Optional[Path] = None,  # move_many에서 미리 만든 폴더 재사용
+    ) -> Dict[str, str]:
+        src_abs = self._safe_resolve(self.allowed[src_base_index] / src_rel, default_base_index=src_base_index)
+        if not src_abs.exists() or not src_abs.is_file():
+            raise FileNotFoundError(f"Source file not found: {src_abs}")
+
+        dst_folder_abs = _prepped_dst or self._safe_resolve(
+            self.allowed[dst_base_index] / dst_folder_rel, default_base_index=dst_base_index
+        )
+        if not dst_folder_abs.exists() or not dst_folder_abs.is_dir():
+            raise FileNotFoundError(f"Destination folder not found: {dst_folder_abs}")
+
+        target_name = new_name or src_abs.name
+        dst_abs = dst_folder_abs / target_name
+
+        status = "moved"
+        if dst_abs.exists():
+            if overwrite:
+                status = "overwritten"
+            else:
+                target_name = self._unique_name(dst_folder_abs, target_name)
+                dst_abs = dst_folder_abs / target_name
+                status = "renamed"
+
+        if dry_run:
+            return {"src": str(src_abs), "dst": str(dst_abs), "status": f"would_{status}"}
+
+        if status == "overwritten" and dst_abs.exists():
+            dst_abs.unlink()
+
+        src_abs.replace(dst_abs)
+        return {"src": str(src_abs), "dst": str(dst_abs), "status": status}
+
+    def move_many(
+            self,
+            items: Union[Dict[str, object], List[Dict[str, object]]],
+            dst_base_index: int,
+            dst_folder_rel: Path,
+            *,
+            overwrite: bool = False,
+            create_dst: bool = True,
+            dry_run: bool = False,
+            on_error: str = "continue",  # "continue" | "stop"
+    ) -> Dict[str, object]:
+        # 단일 dict도 허용 → 리스트로 정규화
+        if isinstance(items, dict):
+            items = [items]
+
+        # 목적지 폴더 1회 준비
+        dst_folder_abs = self._safe_resolve(self.allowed[dst_base_index] / dst_folder_rel,
+                                            default_base_index=dst_base_index)
+        if create_dst:
+            dst_folder_abs.mkdir(parents=True, exist_ok=True)
+        if not dst_folder_abs.exists() or not dst_folder_abs.is_dir():
+            raise FileNotFoundError(f"Destination folder not found: {dst_folder_abs}")
+
+        moved, errors = [], []
+
+        for it in items:
+            try:
+                r = self._move(
+                    src_base_index=int(it["src_base_index"]),
+                    src_rel=Path(str(it["src_rel"])),
+                    dst_base_index=dst_base_index,
+                    dst_folder_rel=dst_folder_rel,
+                    new_name=str(it.get("new_name")) if it.get("new_name") else None,
+                    overwrite=overwrite,
+                    dry_run=dry_run,
+                    _prepped_dst=dst_folder_abs,  # 재사용
+                )
+                moved.append(r)
+            except Exception as e:
+                err = {"item": f'{it.get("src_base_index")}:{it.get("src_rel")}', "error": str(e)}
+                errors.append(err)
+                if on_error == "stop":
+                    break
+
+        return {"moved": moved, "errors": errors, "dst": str(dst_folder_abs)}
