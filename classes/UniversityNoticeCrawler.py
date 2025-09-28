@@ -1,30 +1,5 @@
-# classes/UniversityNoticeCrawler.py
-
-from lxml import html
-import requests
-from typing import List, Dict, Any, Optional
-
-
-class BaseWebCrawler:
-    def __init__(self, base_url: str):
-        self.base_url = base_url
-
-    def _fetch_html(self, url: str) -> html.HtmlElement:
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-
-            # 응답 데이터를 바로 UTF-8로 디코딩
-            return html.fromstring(response.content.decode('utf-8'))
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"URL 접속 실패: {e}")
-        except UnicodeDecodeError as e:
-            # UTF-8 디코딩 실패 시 다른 인코딩 시도
-            try:
-                return html.fromstring(response.content.decode('euc-kr'))
-            except Exception:
-                raise RuntimeError(f"인코딩 실패: {e}")
-
+from typing import List, Dict
+from classes.BaseWebCrawler import BaseWebCrawler
 
 class UniversityNoticeCrawler(BaseWebCrawler):
 
