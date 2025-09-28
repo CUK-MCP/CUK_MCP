@@ -1,63 +1,82 @@
-# classes/UniversityNoticeCrawler.py
-
-from lxml import html
-import requests
+import datetime
 from typing import List, Dict, Any, Optional
-
-
-class BaseWebCrawler:
-    def __init__(self, base_url: str):
-        self.base_url = base_url
-
-    def _fetch_html(self, url: str) -> html.HtmlElement:
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-
-            # 응답 데이터를 바로 UTF-8로 디코딩
-            return html.fromstring(response.content.decode('utf-8'))
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"URL 접속 실패: {e}")
-        except UnicodeDecodeError as e:
-            # UTF-8 디코딩 실패 시 다른 인코딩 시도
-            try:
-                return html.fromstring(response.content.decode('euc-kr'))
-            except Exception:
-                raise RuntimeError(f"인코딩 실패: {e}")
-
+from classes.BaseWebCrawler import BaseWebCrawler
 
 class UniversityNoticeCrawler(BaseWebCrawler):
-
-    def get_document_links(self) -> List[Dict[str, str]]:
+    """
+    우리 학교 공지사항 페이지를 크롤링하는 클래스.
+    """
+    def get_document_links(self, category: Optional[str] = None) -> List[Dict[str, str]]:
         """
-        우리 학교 공지사항 페이지에서 제목, 하이퍼링크, 날짜를 추출합니다.
+        지정된 카테고리의 공지사항 목록을 추출합니다.
+        게시일이 1달 이내인 문서만 반환합니다.
 
-        Returns:
-            각 공지사항의 제목, URL, 날짜를 담은 딕셔너리 리스트.
+        Args:
+            category (Optional[str]): '일반', '학사', '장학', '취창업' 중 하나.
         """
-        # 기본 URL 사용
-        url = self.base_url
+        category_map = {
+            '일반': 20,
+            '학사': 21,
+            '장학': 22,
+            '취창업': 23
+        }
 
-        tree = self._fetch_html(url)
-        rows = tree.xpath('//*[@id="cms-content"]//table/tbody/tr')
+        # 카테고리가 전달되지 않거나 유효하지 않은 경우, 전체 목록 URL을 구성합니다.
+        if category and category in category_map:
+            category_id = category_map[category]
+            url = f"{self.base_url}?mode=list&srCategoryId={category_id}&srSearchKey=&srSearchVal="
+        else:
+            # 카테고리가 None이거나 유효하지 않을 때, 전체 공지사항을 가져오기 위한 URL
+            url = f"{self.base_url}?mode=list"
 
         links = []
-        for row in rows:
-            date_tag = row.xpath('.//span[@class="b-date"]/text()')
-            date_str = date_tag[0].strip() if date_tag else "날짜 없음"
+        page_offset = 0
+        one_month_ago = (datetime.datetime.now() - datetime.timedelta(days=30)).date()
+        stop_crawling = False
 
-            link_tag = row.xpath('.//a[@class="b-title"]')
+        while not stop_crawling:
+            final_url = f"{url}&articleLimit=10&article.offset={page_offset}"
+            tree = self._fetch_html(final_url)
 
-            if link_tag:
-                title = link_tag[0].text_content().strip()
-                href = link_tag[0].get('href')
+            if not tree:
+                break
 
-                if title and href:
-                    full_url = "https://www.catholic.ac.kr" + href
-                    links.append({
-                        "title": title,
-                        "url": full_url,
-                        "date": date_str
-                    })
+            rows = tree.xpath('//div[@class="bn-list-common01 list_type_basic"]/table/tbody/tr')
+            if not rows:
+                break
+
+            for row in rows:
+                date_tag = row.xpath('./td[4]/text()')
+                date_str = date_tag[0].strip() if date_tag else None
+
+                if not date_str:
+                    continue
+
+                try:
+                    notice_date = datetime.datetime.strptime(date_str, '%Y.%m.%d').date()
+                    if notice_date < one_month_ago:
+                        stop_crawling = True
+                        break
+                except ValueError:
+                    print(f"날짜 형식 오류: {date_str}. 크롤링을 계속합니다.")
+                    continue
+
+                link_tag = row.xpath('.//a[@class="b-title"]')
+                if link_tag:
+                    title = link_tag[0].text_content().strip()
+                    href = link_tag[0].get('href')
+
+                    if title and href:
+                        full_url = "https://www.catholic.ac.kr" + href
+                        links.append({
+                            "title": title,
+                            "url": full_url,
+                            "date": date_str
+                        })
+
+            if stop_crawling:
+                break
+
+            page_offset += 10
 
         return links
