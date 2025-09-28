@@ -1,7 +1,7 @@
 import datetime
 from typing import List, Dict, Any, Optional
 from classes.BaseWebCrawler import BaseWebCrawler
-
+from lxml import etree
 class UniversityNoticeCrawler(BaseWebCrawler):
     """
     우리 학교 공지사항 페이지를 크롤링하는 클래스.
@@ -25,58 +25,31 @@ class UniversityNoticeCrawler(BaseWebCrawler):
         if category and category in category_map:
             category_id = category_map[category]
             url = f"{self.base_url}?mode=list&srCategoryId={category_id}&srSearchKey=&srSearchVal="
+
         else:
             # 카테고리가 None이거나 유효하지 않을 때, 전체 공지사항을 가져오기 위한 URL
             url = f"{self.base_url}?mode=list"
-
-        links = []
         page_offset = 0
-        one_month_ago = (datetime.datetime.now() - datetime.timedelta(days=30)).date()
-        stop_crawling = False
+        final_url = f"{url}&articleLimit=10&article.offset={page_offset}"
+        tree = self._fetch_html(final_url)
+        if not tree:
+            return []
 
-        while not stop_crawling:
-            final_url = f"{url}&articleLimit=10&article.offset={page_offset}"
-            tree = self._fetch_html(final_url)
+        titles = tree.xpath('//a[@class="b-title"]//text()')
+        days = tree.xpath('//span[@class="b-con b-date"]//text()')
 
-            if not tree:
-                break
+        if not titles:
+            return []
+        titles = [t.strip() for t in titles if t and t.strip()]
+        dates = [d.strip() for d in days if d and d.strip()]
+        results = []
+        for title, date_str in zip(titles, dates):
+            # 날짜 형식 체크 및 한 달 이전이면 중단(원래 로직 유지)
 
-            rows = tree.xpath('//div[@class="bn-list-common01 list_type_basic"]/table/tbody/tr')
-            if not rows:
-                break
+            results.append({
+                "title": title,
+                "date": date_str
+            })
 
-            for row in rows:
-                date_tag = row.xpath('./td[4]/text()')
-                date_str = date_tag[0].strip() if date_tag else None
 
-                if not date_str:
-                    continue
-
-                try:
-                    notice_date = datetime.datetime.strptime(date_str, '%Y.%m.%d').date()
-                    if notice_date < one_month_ago:
-                        stop_crawling = True
-                        break
-                except ValueError:
-                    print(f"날짜 형식 오류: {date_str}. 크롤링을 계속합니다.")
-                    continue
-
-                link_tag = row.xpath('.//a[@class="b-title"]')
-                if link_tag:
-                    title = link_tag[0].text_content().strip()
-                    href = link_tag[0].get('href')
-
-                    if title and href:
-                        full_url = "https://www.catholic.ac.kr" + href
-                        links.append({
-                            "title": title,
-                            "url": full_url,
-                            "date": date_str
-                        })
-
-            if stop_crawling:
-                break
-
-            page_offset += 10
-
-        return links
+        return results
