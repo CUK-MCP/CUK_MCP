@@ -74,9 +74,9 @@ def create_server(allowed_paths: List[Path]):
     # from app.tools.math_tools import register as register_math
     # register_math(mcp)
     from app.tools.file_tools import register as register_file_tools
-    from app.tools.web_tool import register as web_tools
+    from app.tools.web_tools import register as register_web_tools
 
-    web_tools(mcp)
+    register_web_tools(mcp)
     register_file_tools(mcp)
 
     return mcp
