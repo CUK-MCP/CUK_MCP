@@ -15,19 +15,7 @@ except Exception:  # pragma: no cover
 
 from classes.file_class import MultiBaseFileManager
 from typing import List, Union
-import logging, sys
 
-logging.disable(logging.CRITICAL)
-
-logging.basicConfig(
-    level=logging.INFO,                 # 필요하면 DEBUG
-    stream=sys.stderr,                  # ★ stdout 금지, stderr 고정
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    force=True,                         # 다른 설정 덮어쓰기
-)
-
-
-log = logging.getLogger("mcp-main")
 
 def _coerce_paths(values: List[Union[str, Path]]) -> List[Path]:
     out: List[Path] = []
@@ -46,7 +34,6 @@ def make_lifespan(allowed_paths: List[Union[str, Path]]):
     async def lifespan(_server: FastMCP):
         # 1) 정규화 + 중복 제거
         norm = _coerce_paths(allowed_paths)
-        log.info("allowed_paths: %s", [str(p) for p in norm])
 
 
         # 2) AppCtx 준비
@@ -57,7 +44,6 @@ def make_lifespan(allowed_paths: List[Union[str, Path]]):
             # 3) dict로 감싸서 내보냄 → 툴에서 ctx.request_context.lifespan_context['app']로 접근
             yield {"app": app}
         finally:
-            log.info("lifespan closing")
             # TODO: 필요 시 정리 작업
             pass
 

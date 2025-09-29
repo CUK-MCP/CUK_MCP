@@ -64,3 +64,12 @@ class UniversityNoticeCrawler(BaseWebCrawler):
                     "link": link
                 })
         return all_results
+
+    def get_notice_detail(self,link: str) -> Dict[str,str]:
+        url = self.base_url + f"{link}"
+        tree = self._fetch_html(url)
+        print(self.base_url)
+        contents = tree.xpath('//div[@class="b-con-box"]//text()')
+        contents = " ".join([c.strip() for c in contents if c and c.strip()])
+
+        return {"contents": contents}

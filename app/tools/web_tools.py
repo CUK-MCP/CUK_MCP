@@ -37,3 +37,17 @@ def register(mcp: FastMCP) -> None:
             return links
         except Exception as e:
             return [{"error": f"공지사항을 가져오는 데 실패했습니다: {e}"}]
+
+    @mcp.tool(name="web-get-university-notices_detail",
+              description="원하는 페이지에 상세 정보를 가져옵니다.(현재 프로토타입입니다) 텍스트가 많이 없을 수 있습니다")
+    async def web_get_university_notices_detail(link: str) -> Dict[str, Any]:
+        """
+        :param link: 원하는 페이지의 href를 입력
+        :return: {"content" : "공지사항의 세부사항"}
+        """
+        crawler = UniversityNoticeCrawler(base_url="https://www.catholic.ac.kr/ko/campuslife/notice.do")
+
+        try:
+            return crawler.get_notice_detail(link)
+        except Exception as e:
+            return {"error": f"공지사항을 가져오는 데 실패했습니다: {e}"}

@@ -1,9 +1,9 @@
 from lxml import html
 import requests
-from abc import ABC
+
 from typing import Optional
 
-class BaseWebCrawler(ABC):
+class BaseWebCrawler():
     """
     모든 웹 크롤러의 기반이 되는 추상 클래스.
     URL 접속 및 HTML 파싱과 같은 공통 기능을 제공합니다.
