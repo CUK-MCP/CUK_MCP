@@ -4,8 +4,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 from classes.UniversityNoticeCrawler_class import UniversityNoticeCrawler
-from classes.file_class import MultiBaseFileManager  # 로컬 파일 저장 시 필요
-
+from classes.file_class import MultiBaseFileManager
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
@@ -39,11 +38,14 @@ def register(mcp: FastMCP) -> None:
             return [{"error": f"공지사항을 가져오는 데 실패했습니다: {e}"}]
 
     @mcp.tool(name="web-get-university-notices_detail",
-              description="원하는 페이지에 상세 정보를 가져옵니다.(현재 프로토타입입니다) 텍스트가 많이 없을 수 있습니다")
+              description="""
+              원하는 공지사항 페이지의 상세 정보를 가져옵니다.
+              HTML 텍스트는 물론, 본문에 포함된 이미지에서 OCR을 통해 추출한 텍스트도 포함됩니다.
+              """)
     async def web_get_university_notices_detail(link: str) -> Dict[str, Any]:
         """
         :param link: 원하는 페이지의 href를 입력
-        :return: {"content" : "공지사항의 세부사항"}
+        :return: {"contents" : "공지사항의 세부사항 (텍스트 + 이미지 텍스트)"}
         """
         crawler = UniversityNoticeCrawler(base_url="https://www.catholic.ac.kr/ko/campuslife/notice.do")
 
