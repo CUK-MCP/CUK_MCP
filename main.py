@@ -5,7 +5,7 @@ import argparse
 from contextlib import asynccontextmanager
 
 from pathlib import Path
-
+import logging
 from app.context import AppCtx
 # If you have fastmcp installed, you can uncomment imports and server creation.
 try:
@@ -91,4 +91,4 @@ if __name__ == "__main__":
 
 
         except Exception as e:
-            log.info(f"[Demo] listdir failed: {e}")
+            logging.info(f"[Demo] listdir failed: {e}")

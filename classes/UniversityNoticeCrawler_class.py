@@ -2,6 +2,9 @@ import datetime
 from typing import List, Dict, Any, Optional
 from classes.BaseWebCrawler_class import BaseWebCrawler
 from lxml import etree
+
+
+
 class UniversityNoticeCrawler(BaseWebCrawler):
     """
     우리 학교 공지사항 페이지를 크롤링하는 클래스.
@@ -65,11 +68,17 @@ class UniversityNoticeCrawler(BaseWebCrawler):
                 })
         return all_results
 
-    def get_notice_detail(self,link: str) -> Dict[str,str]:
+    def get_notice_detail(self, link: str) -> Dict[str, str]:
         url = self.base_url + f"{link}"
         tree = self._fetch_html(url)
-        print(self.base_url)
+
+        # 일반 텍스트 추출
         contents = tree.xpath('//div[@class="b-con-box"]//text()')
         contents = " ".join([c.strip() for c in contents if c and c.strip()])
 
-        return {"contents": contents}
+
+        return {
+            "contents": contents,
+            "url": url,
+            "notice": "contents가 없거나 정보가 부족한 경우 사용자에게 url을 보여주세요."
+        }

@@ -1,6 +1,5 @@
 from lxml import html
 import requests
-
 from typing import Optional
 
 class BaseWebCrawler():
