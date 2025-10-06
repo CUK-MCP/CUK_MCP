@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+import glob
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -43,6 +44,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, ElementClickInterceptedException
+)
 
 # from webdriver_manager.chrome import ChromeDriverManager
 
@@ -69,6 +75,7 @@ class Act(str, Enum):
     EXPECT_TEXT = "expect_text"      # 요소 텍스트 포함 어설션
     SCREENSHOT = "screenshot"        # 스크린샷 저장
     # 필요 시 확장: SELECT, HOVER, SCROLL, UPLOAD 등
+    WAIT_DOWNLOAD = "wait_download"
 
 
 @dataclass
@@ -123,7 +130,7 @@ class SeleniumFlowRunner:
     def __init__(
         self,
         download_root: Path | str,
-        headless: bool = False,
+        headless: bool = True,
         max_workers: int = 2,
         page_wait: int = 30,
         download_timeout: int = 600,
@@ -174,21 +181,39 @@ class SeleniumFlowRunner:
         opts = Options()
         if self.headless:
             opts.add_argument("--headless=new")
+        else:
+            opts.add_argument("--start-maximized")
+            if getattr(self, "keep_open", False):
+                opts.add_experimental_option("detach", True)
+
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
-
+        opts.add_argument("--window-size=1920,1080")
         prefs = {
-            "download.default_directory": str(dl_dir.resolve()),
-            "download.prompt_for_download": False,
+            "download.default_directory": str(dl_dir.resolve()),  # ✅ 절대경로
+            "download.prompt_for_download": False,  # 저장창 금지
             "download.directory_upgrade": True,
             "safebrowsing.enabled": True,
+            "plugins.always_open_pdf_externally": True,  # PDF 강제 저장
         }
         opts.add_experimental_option("prefs", prefs)
-        # driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
+
         driver = webdriver.Chrome(options=opts)
         driver.set_page_load_timeout(self.page_wait)
         driver.set_script_timeout(self.page_wait)
-        opts.add_experimental_option("detach", True)
+
+        # ✅ headless에서 다운로드 허용 (CDP)
+        if self.headless:
+            params = {"behavior": "allow", "downloadPath": str(dl_dir.resolve())}
+            try:
+                driver.execute_cdp_cmd("Page.setDownloadBehavior", params)
+            except Exception:
+                # 일부 버전 호환: 시도만 하고 실패해도 무시
+                try:
+                    driver.execute_cdp_cmd("Browser.setDownloadBehavior", params)
+                except Exception:
+                    pass
+
         return driver
 
     def _run(self, job: FlowJob, cancel: threading.Event) -> None:
@@ -203,6 +228,7 @@ class SeleniumFlowRunner:
                     job.message = "canceled by user"
                     return
                 self._exec_step(driver, job, step)
+
 
             # (옵션) 다운로드 결과 추출: 가장 최신 파일 1개와 해시 계산
             res = self._detect_latest_file(job.out_dir)
@@ -220,8 +246,46 @@ class SeleniumFlowRunner:
             except Exception:
                 pass
 
-    # 한 스텝 실행
-    def _exec_step(self, driver: webdriver.Chrome, job: FlowJob, step: Step) -> None:
+    # --- 클래스 내부 메서드로 추가 (SeleniumFlowRunner 안) ---
+    def _by_and_value(self, sel: str):
+        """
+        셀렉터 문자열이 XPath인지 CSS인지 자동 판별해서 (By, value) 튜플로 반환.
+        - "xpath=..." 접두사 → XPath
+        - "/" 또는 "(" 로 시작 → XPath (예: //div, (//button)[2])
+        - 그 외 → CSS
+        """
+        s = (sel or "").strip()
+        if s.startswith("xpath="):
+            return By.XPATH, s[len("xpath="):]
+        if s.startswith("/") or s.startswith("("):
+            return By.XPATH, s
+        return By.CSS_SELECTOR, s
+
+    def _wait_for_download(self, folder: Path, timeout: int = 120, pattern: str | None = None):
+        """
+        지정된 폴더에서 새로 생성된 파일을 감시하여
+        .crdownload가 사라지고 크기가 더 이상 변하지 않을 때까지 대기.
+        """
+        end = time.time() + timeout
+        seen = {}
+        while time.time() < end:
+            if pattern:
+                files = [Path(p) for p in glob.glob(str(folder / pattern))]
+            else:
+                files = [p for p in folder.iterdir() if p.is_file()]
+            # .crdownload(다운로드중 파일) 제외
+            files = [p for p in files if not p.name.endswith(".crdownload")]
+            if files:
+                latest = max(files, key=lambda p: p.stat().st_mtime)
+                size = latest.stat().st_size
+                # 같은 파일 크기가 연속으로 유지되면 완료로 간주
+                if latest in seen and seen[latest] == size:
+                    return latest
+                seen[latest] = size
+            time.sleep(0.5)
+        return None
+
+    def _exec_step(self, driver, job, step) -> None:
         wait = WebDriverWait(driver, step.wait_sec or self.default_wait)
 
         def _with_retry(fn, retry: int):
@@ -234,26 +298,50 @@ class SeleniumFlowRunner:
                     time.sleep(0.5)
             raise last_err
 
-        def _wait_invisible():
-            wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, step.selector)))
-
+        # ---- 액션 구현부 (모든 locator에 _by_and_value 적용) ----
         def _click():
-            el = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, step.selector)))
-            el.click()
+            by, val = self._by_and_value(step.selector)
+            el = wait.until(EC.element_to_be_clickable((by, val)))
+            try:
+                el.click()
+            except ElementClickInterceptedException:
+                # 흔한 오버레이(#devloadingBar) 대기 후 재시도
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.invisibility_of_element_located((By.CSS_SELECTOR, "#devloadingBar"))
+                    )
+                except Exception:
+                    pass
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                time.sleep(0.2)
+                try:
+                    el.click()
+                except ElementClickInterceptedException:
+                    driver.execute_script("arguments[0].click();", el)  # 최후: JS 클릭
 
         def _type():
-            el = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, step.selector)))
-            el.clear()
+            by, val = self._by_and_value(step.selector)
+            el = wait.until(EC.visibility_of_element_located((by, val)))
+            try:
+                el.clear()
+            except Exception:
+                pass
             el.send_keys(step.value or "")
 
         def _wait_visible():
-            wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, step.selector)))
+            by, val = self._by_and_value(step.selector)
+            wait.until(EC.visibility_of_element_located((by, val)))
 
         def _wait_clickable():
-            wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, step.selector)))
+            by, val = self._by_and_value(step.selector)
+            wait.until(EC.element_to_be_clickable((by, val)))
 
         def _wait_url_contains():
             wait.until(EC.url_contains(step.value or ""))
+
+        def _wait_invisible():
+            by, val = self._by_and_value(step.selector)
+            wait.until(EC.invisibility_of_element_located((by, val)))
 
         def _sleep():
             time.sleep(float(step.value or 1))
@@ -262,15 +350,27 @@ class SeleniumFlowRunner:
             driver.execute_script(step.value or "")
 
         def _expect_text():
-            el = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, step.selector)))
-            text = el.text or ""
-            kw = step.value or ""
+            by, val = self._by_and_value(step.selector)
+            el = wait.until(EC.visibility_of_element_located((by, val)))
+            text = (el.text or "").strip()
+            kw = (step.value or "").strip()
             if kw not in text:
-                raise AssertionError(f"expect_text: '{kw}' not in element text")
+                raise AssertionError(f"expect_text: '{kw}' not in element text (got: '{text}')")
 
         def _screenshot():
-            p = job.out_dir / f"{int(time.time()*1000)}.png"
+            p = job.out_dir / f"{int(time.time() * 1000)}.png"
             driver.save_screenshot(str(p))
+
+        #(선택) 다운로드 완료 대기 액션이 있다면 여기도 적용
+        def _wait_download():
+            # step.value에 "*.xlsx" 같은 glob 패턴이 올 수 있음
+            target = self._wait_for_download(job.out_dir, timeout=step.wait_sec or self.download_timeout,
+                                             pattern=step.value)
+            if not target:
+                raise TimeoutException("download not detected")
+            job.result = DownloadResult(
+                file_path=target, file_size=target.stat().st_size, sha256=self._sha256(target)
+            )
 
         action_map = {
             Act.GOTO: lambda: driver.get(step.value or ""),
@@ -279,22 +379,26 @@ class SeleniumFlowRunner:
             Act.WAIT_VISIBLE: _wait_visible,
             Act.WAIT_CLICKABLE: _wait_clickable,
             Act.WAIT_URL_CONTAINS: _wait_url_contains,
+            Act.WAIT_INVISIBLE: _wait_invisible,  # ← 추가된 액션
             Act.SLEEP: _sleep,
             Act.EXEC_JS: _exec_js,
             Act.EXPECT_TEXT: _expect_text,
             Act.SCREENSHOT: _screenshot,
-            Act.WAIT_INVISIBLE: _wait_invisible,
+            # 선택적으로 사용하는 경우만 등록
+            Act.WAIT_DOWNLOAD: _wait_download if hasattr(Act, "WAIT_DOWNLOAD") else (lambda: None),
         }
-        fn = action_map.get(step.act)
+
+        # 문자열로 들어온 act도 안전하게 Enum으로 변환
+        act_key = step.act if isinstance(step.act, Act) else Act(step.act)
+        fn = action_map.get(act_key)
         if not fn:
             raise ValueError(f"unsupported act: {step.act}")
 
         try:
             _with_retry(fn, step.retry)
-        except (TimeoutException, NoSuchElementException, ElementClickInterceptedException) as e:
-            if step.optional:
-                # 선택 스텝이면 실패를 무시하고 다음 단계로 진행
-                return
+        except (TimeoutException, NoSuchElementException, ElementClickInterceptedException):
+            if getattr(step, "optional", False):
+                return  # 선택 스텝이면 실패 무시
             raise
 
         # 최신 파일 추정(선택)
@@ -335,8 +439,13 @@ if __name__ == "__main__":
         Step(Act.GOTO, value="https://uportal.catholic.ac.kr/stw/scsr/scoo/scooOpsbOpenSubjectInq.do"),
         Step(Act.WAIT_VISIBLE, selector="#devloadingBar", wait_sec=2, optional=True),
         Step(Act.WAIT_INVISIBLE, selector="#devloadingBar", wait_sec=30),
+        Step(Act.SLEEP, value="1.5"),
         Step(Act.WAIT_CLICKABLE, selector='[onclick="$.scooOpsbOpenSubjectInq.excelDownload();"]'),
         Step(Act.CLICK, selector='[onclick="$.scooOpsbOpenSubjectInq.excelDownload();"]'),
+        Step(Act.WAIT_VISIBLE, selector="/html/body/div[4]/div/div[2]/label/textarea",wait_sec=5),
+        Step(Act.TYPE, selector="/html/body/div[4]/div/div[2]/label/textarea", value="데이터 사용"),
+        Step(Act.CLICK, selector="/html/body/div[4]/div/div[3]/div/div[1]/div/button"),
+        Step(Act.WAIT_DOWNLOAD, value="*.xlsx", wait_sec=120),  # ← 이게 핵심
         # Step(Act.WAIT_VISIBLE, selector=".n-form.devClose", wait_sec=10),
         # Step(Act.WAIT_CLICKABLE, selector=".n-form.devClose", wait_sec=10),
         # Step(Act.CLICK, selector=".n-form.devClose"),
