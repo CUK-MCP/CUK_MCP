@@ -425,8 +425,8 @@ class SeleniumFlowRunner:
 if __name__ == "__main__":
     runner = SeleniumFlowRunner(download_root=Path.cwd() / "flows")
 
-    USER = os.getenv("SITE_USER", "") or "kimho9270"
-    PASS = os.getenv("SITE_PASS", "") or "kim66859270@"
+    USER = os.getenv("SITE_USER", "")
+    PASS = os.getenv("SITE_PASS", "")
 
     steps = [
         Step(Act.GOTO, value="https://uportal.catholic.ac.kr/sso/jsp/sso/ip/login_form.jsp"),
