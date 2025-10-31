@@ -61,10 +61,11 @@ def create_server(allowed_paths: List[Path]):
     # register_math(mcp)
     from app.tools.file_tools import register as register_file_tools
     from app.tools.web_tools import register as register_web_tools
+    from app.tools.timetable_tools import register as register_timetable_tools
 
     register_web_tools(mcp)
     register_file_tools(mcp)
-
+    register_timetable_tools(mcp)
     return mcp
 
 
