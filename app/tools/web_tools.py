@@ -71,7 +71,6 @@ def register(mcp: FastMCP) -> None:
             end_page: int = 1
     ) -> list[Dict[str, Any]]:
         """
-
         :param department: 학과 문자열
         :param start_page: 시작페이지
         :param end_page: 끝 페이지
